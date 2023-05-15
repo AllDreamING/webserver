@@ -72,7 +72,7 @@ bool threadpool<T>::append(T *request){
 }
 
 template <typename T>
-void *threadpool<T>::worker(void *arg){
+void *threadpool<T>::worker(void *arg){ //静态函数无法访问非静态成员，需要封装一下
     threadpool* pool = (threadpool*)arg;
     pool->run();
     return pool;
@@ -83,7 +83,7 @@ void threadpool<T>::run(){
     while(!m_stop){
         m_queuestat.wait(); //是否有任务
         m_queuelocker.lock();   //上锁
-        if(m_workqueue.empty()){
+        if(m_workqueue.empty()){    //任务队列为空
             m_queuelocker.unlock();
             continue;
         }
