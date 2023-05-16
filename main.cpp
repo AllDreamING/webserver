@@ -1,112 +1,127 @@
-#include<stdio.h>
-#include<stdlib.h>
-#include<arpa/inet.h>
-#include<string.h>
-#include<errno.h>
-#include<unistd.h>
-#include<fcntl.h>
-#include<sys/epoll.h>
-#include"threadpool.h"
-#include"locker.h"
-#include<signal.h>
-#include"http_conn.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/epoll.h>
+#include "locker.h"
+#include "threadpool.h"
+#include "http_conn.h"
 
-#define MAX_FD 65535    //最大文件描述符个数
-#define MAX_EVENT_NUMBER 10000  //最大监听事件个数
+#define MAX_FD 65536   // 最大的文件描述符个数
+#define MAX_EVENT_NUMBER 10000  // 监听的最大的事件数量
 
-void addsig(int sig,void(handler)(int)){    //信号捕捉函数
-    struct sigaction sa;        //信号处理结构体
-    memset(&sa,0,sizeof(sa));   //清空
-    sa.sa_handler = handler;    //处理函数
-    sigfillset(&sa.sa_mask);    //将信号加入到阻塞集中
-    sigaction(sig,&sa,NULL);    //sa对接收到的信号sig进行处理
+// 添加文件描述符
+extern void addfd( int epollfd, int fd, bool one_shot );
+extern void removefd( int epollfd, int fd );
+
+void addsig(int sig, void( handler )(int)){
+    struct sigaction sa;
+    memset( &sa, '\0', sizeof( sa ) );
+    sa.sa_handler = handler;
+    sigfillset( &sa.sa_mask );
+    assert( sigaction( sig, &sa, NULL ) != -1 );
 }
 
-extern void addfd(int epollfd,int fd,bool oneshot); //添加文件描述符到epoll中
-extern void removefd(int epollfd,int fd);   //从epoll中删除文件描述符
-extern void modfd(int epollfd,int fd,int ev);   //修改文件描述符,重置socket上的oneshot事件
-
-int main(int argc,char* argv[]){
-
-    if(argc<=1){
-        printf("按照如下格式运行： %s port_number\n",basename(argv[0]));
-        exit(-1);
+int main( int argc, char* argv[] ) {
+    
+    if( argc <= 1 ) {
+        printf( "usage: %s port_number\n", basename(argv[0]));
+        return 1;
     }
 
-    int port = atoi(argv[1]);   //获取端口号
+    int port = atoi( argv[1] );
+    addsig( SIGPIPE, SIG_IGN );
 
-    addsig(SIGPIPE,SIG_IGN);    //忽略SIGPIE信号
-
-    threadpool<http_conn>* pool = NULL; //创建线程池
-    try
-    {
+    threadpool< http_conn >* pool = NULL;
+    try {
         pool = new threadpool<http_conn>;
-    }
-    catch(...)
-    {
-        exit(-1);
+    } catch( ... ) {
+        return 1;
     }
 
-    http_conn* users = new http_conn[MAX_FD];   //创建一个数组用来存放客户端信息
+    http_conn* users = new http_conn[ MAX_FD ];
 
-    int listenfd = socket(PF_INET,SOCK_STREAM,0);   //创建一个监听的套接字
+    int listenfd = socket( PF_INET, SOCK_STREAM, 0 );
 
-    int reuse = 1;
-    setsockopt(listenfd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));  //设置端口复用,须在绑定之前
-
+    int ret = 0;
     struct sockaddr_in address;
-    address.sin_family = AF_INET;   //设置地址家族，TCP/IP – IPv4
-    address.sin_addr.s_addr = INADDR_ANY;   //IP地址为任意地址
-    address.sin_port = htons(port); //端口号，将主机字节序转为网络字节序
-    bind(listenfd,(struct sockaddr*)&address,sizeof(address));  //绑定
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_family = AF_INET;
+    address.sin_port = htons( port );
 
-    listen(listenfd,5); //监听
+    // 端口复用
+    int reuse = 1;
+    setsockopt( listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof( reuse ) );
+    ret = bind( listenfd, ( struct sockaddr* )&address, sizeof( address ) );
+    ret = listen( listenfd, 5 );
 
-    epoll_event events[MAX_EVENT_NUMBER];   //事件数组
-    int epollfd  = epoll_create(5); //创建epoll对象
-
-    addfd(epollfd,listenfd,false);
+    // 创建epoll对象，和事件数组，添加
+    epoll_event events[ MAX_EVENT_NUMBER ];
+    int epollfd = epoll_create( 5 );
+    // 添加到epoll对象中
+    addfd( epollfd, listenfd, false );
     http_conn::m_epollfd = epollfd;
 
-    while (true){
-        int num = epoll_wait(epollfd,events,MAX_EVENT_NUMBER,-1);
-        if((num < 0) && (errno != EINTR)){
-            printf("epoll fail\n");
+    while(true) {
+        
+        int number = epoll_wait( epollfd, events, MAX_EVENT_NUMBER, -1 );
+        
+        if ( ( number < 0 ) && ( errno != EINTR ) ) {
+            printf( "epoll failure\n" );
             break;
         }
 
-        for(int i=0;i<num;i++){
+        for ( int i = 0; i < number; i++ ) {
+            
             int sockfd = events[i].data.fd;
-            if(sockfd==listenfd){   //有客户端连接进来
+            
+            if( sockfd == listenfd ) {
+                
                 struct sockaddr_in client_address;
-                socklen_t client_addrlen = sizeof(client_address);
-                int connfd = accept(listenfd,(struct sockaddr*)&client_address,&client_addrlen);//建立连接
+                socklen_t client_addrlength = sizeof( client_address );
+                int connfd = accept( listenfd, ( struct sockaddr* )&client_address, &client_addrlength );
+                
+                if ( connfd < 0 ) {
+                    printf( "errno is: %d\n", errno );
+                    continue;
+                } 
 
-                if(http_conn::m_user_count >= MAX_FD){  //目前的连接数满了
+                if( http_conn::m_user_count >= MAX_FD ) {
                     close(connfd);
                     continue;
                 }
-                users[connfd].init(connfd,client_address);//将新的客户端的数据初始化放到数组中
-            }else if(events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)){//对方异常断开或者错误的事件发生
-                users[sockfd].close_conn();//关闭连接
-            }else if(events[i].events & EPOLLIN){   //有 读 的事件发生
-                if(users[sockfd].read()){   //一次性将所有数据读完
-                    pool->append(users + sockfd);   //将任务转交线程进行执行
-                }else{
-                    users[sockfd].close_conn(); //读失败就关闭连接
+                users[connfd].init( connfd, client_address);
+
+            } else if( events[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) ) {
+
+                users[sockfd].close_conn();
+
+            } else if(events[i].events & EPOLLIN) {
+
+                if(users[sockfd].read()) {
+                    pool->append(users + sockfd);
+                } else {
+                    users[sockfd].close_conn();
                 }
-            }else if(events[i].events & EPOLLOUT){  //有 写 的事件发生
-                if(!users[sockfd].write()){     //一次性写完所有数据
-                    users[sockfd].close_conn(); //写完就关闭连接
+
+            }  else if( events[i].events & EPOLLOUT ) {
+
+                if( !users[sockfd].write() ) {
+                    users[sockfd].close_conn();
                 }
+
             }
         }
     }
-
-    close(epollfd);
-    close(listenfd);
+    
+    close( epollfd );
+    close( listenfd );
     delete [] users;
     delete pool;
-
     return 0;
 }
